@@ -1,729 +1,531 @@
-#include <Arduino.h>
-#include <WiFi.h>
-#include <ESPAsyncWebServer.h>
-#include <ArduinoJson.h>
-#include "esp_camera.h"
-#include "FS.h"
-#include "SD.h"
-#include "SPI.h"
+/*
+ * XIAO ESP32S3 Sense Security Camera System
+ * 
+ * Features:
+ * - AI-powered person detection using TensorFlow Lite Micro
+ * - Real-time alerts with buzzer and LED indicators
+ * - LINE Notify integration for instant notifications
+ * - Video recording to SD card
+ * - Live streaming web interface
+ * 
+ * Hardware: Seeed Studio XIAO ESP32S3 Sense
+ * Author: Security Camera System
+ * Date: 2025-10-13
+ */
 
-// Pin definitions for XIAO ESP32S3 SENSE
-// LED_BUILTIN is already defined in the framework (pin 21)
-#define BUTTON_PIN 0    // Boot button (can be used as input)
+#include "security_camera.h"
+#include "config.h"
 
-// Camera pin definitions for XIAO ESP32S3 SENSE
-#define PWDN_GPIO_NUM     -1
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM     10
-#define SIOD_GPIO_NUM     40
-#define SIOC_GPIO_NUM     39
-#define Y9_GPIO_NUM       48
-#define Y8_GPIO_NUM       11
-#define Y7_GPIO_NUM       12
-#define Y6_GPIO_NUM       14
-#define Y5_GPIO_NUM       16
-#define Y4_GPIO_NUM       18
-#define Y3_GPIO_NUM       17
-#define Y2_GPIO_NUM       15
-#define VSYNC_GPIO_NUM    38
-#define HREF_GPIO_NUM     47
-#define PCLK_GPIO_NUM     13
+// Global variables
+SystemState current_state = STATE_INITIALIZING;
+AlertSystem alert_system = {false, false, false, 0, 0, false};
+RecordingSystem recording_system = {false, 0, "", File()};
+AsyncWebServer server(web_server_port);
 
-// Microphone and SD card pins
-#define MIC_PIN           42  // Digital microphone data pin
-#define MIC_CLOCK_PIN     41  // Digital microphone clock pin
-#define SD_CS_PIN         21  // SD card chip select
-
-// WiFi credentials (change these to your network)
-const char* ssid = "Buffalo-G-B158";
-const char* password = "fnf3h4igtvtb6";
-
-// AP Mode settings
-const char* ap_ssid = "XIAO-ESP32S3-SENSE";
-const char* ap_password = "12345678";
-
-// Variables
-unsigned long previousMillis = 0;
-unsigned long previousScanMillis = 0;
-const long interval = 1000;  // LED blink interval
-const long scanInterval = 30000;  // WiFi scan interval (30 seconds)
-bool ledState = false;
-bool wifiConnected = false;
-bool apMode = false;
-
-// Web server
-AsyncWebServer server(80);
-
-// System monitoring variables
-struct SystemStats {
-  unsigned long uptime;
-  uint32_t freeHeap;
-  int wifiRSSI;
-  bool ledStatus;
-  int temperature; // Placeholder for future sensor
-  bool motionDetected; // Placeholder for PIR sensor
+// Camera configuration
+camera_config_t camera_config = {
+    .pin_pwdn = PWDN_GPIO_NUM,
+    .pin_reset = RESET_GPIO_NUM,
+    .pin_xclk = XCLK_GPIO_NUM,
+    .pin_sscb_sda = SIOD_GPIO_NUM,
+    .pin_sscb_scl = SIOC_GPIO_NUM,
+    .pin_d7 = Y9_GPIO_NUM,
+    .pin_d6 = Y8_GPIO_NUM,
+    .pin_d5 = Y7_GPIO_NUM,
+    .pin_d4 = Y6_GPIO_NUM,
+    .pin_d3 = Y5_GPIO_NUM,
+    .pin_d2 = Y4_GPIO_NUM,
+    .pin_d1 = Y3_GPIO_NUM,
+    .pin_d0 = Y2_GPIO_NUM,
+    .pin_vsync = VSYNC_GPIO_NUM,
+    .pin_href = HREF_GPIO_NUM,
+    .pin_pclk = PCLK_GPIO_NUM,
+    .xclk_freq_hz = 20000000,
+    .ledc_timer = LEDC_TIMER_0,
+    .ledc_channel = LEDC_CHANNEL_0,
+    .pixel_format = PIXFORMAT_JPEG,
+    .frame_size = camera_frame_size,
+    .jpeg_quality = camera_jpeg_quality,
+    .fb_count = camera_fb_count,
+    .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
+    .fb_location = CAMERA_FB_IN_PSRAM
 };
 
-// Debug settings
-#define DEBUG_SERIAL 1
-#define DEBUG_WIFI 1
-#define DEBUG_CAMERA 1
-#define DEBUG_WEB 1
-
-// Debug macros
-#if DEBUG_SERIAL
-  #define DEBUG_PRINT(x) Serial.print(x)
-  #define DEBUG_PRINTLN(x) Serial.println(x)
-  #define DEBUG_PRINTF(fmt, ...) Serial.printf(fmt, ##__VA_ARGS__)
-#else
-  #define DEBUG_PRINT(x)
-  #define DEBUG_PRINTLN(x)
-  #define DEBUG_PRINTF(fmt, ...) do {} while(0)
-#endif
-
-// Function declarations
-void setupWebServer();
-bool initCamera();
-void handleCameraStream(AsyncWebServerRequest *request);
-void debugSystemInfo();
-void debugWiFiInfo();
-void debugCameraInfo();
-
-// Camera state
-bool cameraInitialized = false;
-String lastError = "";
+// Static variables for detection timing
+static unsigned long last_detection_time = 0;
+static unsigned long last_inference_time = 0;
 
 void setup() {
-  // Initialize serial communication
-  Serial.begin(115200);
-  delay(2000); // Longer delay for serial stabilization
-  
-  DEBUG_PRINTLN("\n========================================");
-  DEBUG_PRINTLN("XIAO ESP32S3 SENSE Debug Mode Starting");
-  DEBUG_PRINTLN("========================================");
-  
-  // System info debugging
-  debugSystemInfo();
-  
-
-  
-  // Initialize pins with debugging
-  DEBUG_PRINTLN("\n--- Pin Initialization ---");
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  digitalWrite(LED_BUILTIN, LOW);
-  DEBUG_PRINTF("LED_BUILTIN (Pin %d): OUTPUT mode set\n", LED_BUILTIN);
-  DEBUG_PRINTF("BUTTON_PIN (Pin %d): INPUT_PULLUP mode set\n", BUTTON_PIN);
-  DEBUG_PRINTF("Initial LED state: %s\n", digitalRead(LED_BUILTIN) ? "HIGH" : "LOW");
-  
-  // WiFi connection attempt with debugging
-  DEBUG_PRINTLN("\n--- WiFi Diagnostics ---");
-  debugWiFiInfo();
-  DEBUG_PRINTF("Target SSID: '%s'\n", ssid);
-  DEBUG_PRINTF("Password length: %d characters\n", strlen(password));
-  DEBUG_PRINTF("WiFi mode before scan: %d\n", WiFi.getMode());
-  
-  // Scan for available networks first
-  Serial.println("Scanning for WiFi networks...");
-  int n = WiFi.scanNetworks();
-  Serial.printf("Found %d networks:\n", n);
-  bool ssidFound = false;
-  
-  for (int i = 0; i < n; ++i) {
-    Serial.printf("%d: %s (%d dBm) %s\n", 
-                  i + 1, 
-                  WiFi.SSID(i).c_str(), 
-                  WiFi.RSSI(i),
-                  (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Encrypted");
+    Serial.begin(115200);
+    Serial.println("\n=== XIAO ESP32S3 Security Camera System ===");
+    Serial.println("Initializing system...");
     
-    if (WiFi.SSID(i) == ssid) {
-      ssidFound = true;
-      Serial.printf("*** Target SSID found with signal strength: %d dBm\n", WiFi.RSSI(i));
-    }
-  }
-  
-  if (!ssidFound) {
-    Serial.printf("WARNING: SSID '%s' not found in scan!\n", ssid);
-  }
-  
-  Serial.println("\nConnecting to WiFi...");
-  WiFi.begin(ssid, password);
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
+    // Initialize hardware pins
+    pinMode(LED_BUILTIN, OUTPUT);
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(LED1_PIN, OUTPUT);
+    pinMode(LED2_PIN, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
     
-    // Show status every 10 attempts
-    if (attempts % 10 == 0) {
-      Serial.printf("\nAttempt %d/30, Status: %d\n", attempts, WiFi.status());
-    }
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    Serial.println("\nWiFi connected successfully!");
-    Serial.printf("IP address: %s\n", WiFi.localIP().toString().c_str());
-    Serial.printf("Signal strength: %d dBm\n", WiFi.RSSI());
-  } else {
-    Serial.println("\nWiFi connection failed - starting AP mode");
+    // Turn off all outputs initially
+    digitalWrite(LED_BUILTIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+    digitalWrite(LED1_PIN, LOW);
+    digitalWrite(LED2_PIN, LOW);
     
-    // Start Access Point mode
-    Serial.println("Starting Access Point mode...");
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(ap_ssid, ap_password);
-    
-    IPAddress IP = WiFi.softAPIP();
-    Serial.printf("AP IP address: %s\n", IP.toString().c_str());
-    Serial.printf("AP SSID: %s\n", ap_ssid);
-    Serial.printf("AP Password: %s\n", ap_password);
-    Serial.println("Connect your device to this AP to access the camera!");
-    apMode = true;
-  }
-  
-  // Initialize camera with detailed debugging
-  DEBUG_PRINTLN("\n--- Camera Initialization ---");
-  debugCameraInfo();
-  DEBUG_PRINTLN("Starting camera initialization...");
-  
-  cameraInitialized = initCamera();
-  if (cameraInitialized) {
-    DEBUG_PRINTLN("✓ Camera initialized successfully!");
-    DEBUG_PRINTF("PSRAM found: %s\n", psramFound() ? "YES" : "NO");
-    if (psramFound()) {
-      DEBUG_PRINTF("PSRAM size: %d bytes\n", ESP.getPsramSize());
-      DEBUG_PRINTF("Free PSRAM: %d bytes\n", ESP.getFreePsram());
-    }
-  } else {
-    DEBUG_PRINTLN("✗ Camera initialization FAILED!");
-    DEBUG_PRINTF("Last error: %s\n", lastError.c_str());
-  }
-  
-  // Setup web server
-  setupWebServer();
-  
-  DEBUG_PRINTLN("\n========================================");
-  DEBUG_PRINTLN("SETUP COMPLETE - System Status:");
-  DEBUG_PRINTF("- Camera: %s\n", cameraInitialized ? "✓ OK" : "✗ FAILED");
-  DEBUG_PRINTF("- WiFi: %s\n", wifiConnected ? "✓ Connected" : (apMode ? "✓ AP Mode" : "✗ Failed"));
-  DEBUG_PRINTF("- Web Server: ✓ Running\n");
-  DEBUG_PRINTF("- Free Heap: %d bytes\n", ESP.getFreeHeap());
-  DEBUG_PRINTLN("========================================\n");
-}
-
-void setupWebServer() {
-  // Serve main monitoring page
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>XIAO ESP32S3 Monitoring System</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f0f0f0; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .header { text-align: center; color: #333; margin-bottom: 30px; }
-        .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .status-card { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #007bff; }
-        .status-value { font-size: 24px; font-weight: bold; color: #007bff; }
-        .status-label { color: #666; font-size: 14px; }
-        .led-control { text-align: center; margin: 20px 0; }
-        .btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; }
-        .btn:hover { background: #0056b3; }
-        .log-area { background: #000; color: #00ff00; padding: 15px; border-radius: 5px; font-family: monospace; height: 200px; overflow-y: scroll; }
-        .alert { padding: 10px; margin: 10px 0; border-radius: 5px; }
-        .alert-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .alert-warning { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>🔍 XIAO ESP32S3 Monitoring System</h1>
-            <p>Real-time system status and control</p>
-        </div>
-        
-        <div class="status-grid">
-            <div class="status-card">
-                <div class="status-value" id="uptime">--</div>
-                <div class="status-label">Uptime (seconds)</div>
-            </div>
-            <div class="status-card">
-                <div class="status-value" id="heap">--</div>
-                <div class="status-label">Free Heap (bytes)</div>
-            </div>
-            <div class="status-card">
-                <div class="status-value" id="wifi">--</div>
-                <div class="status-label">WiFi RSSI (dBm)</div>
-            </div>
-            <div class="status-card">
-                <div class="status-value" id="led">--</div>
-                <div class="status-label">LED Status</div>
-            </div>
-        </div>
-        
-        <div class="led-control">
-            <button class="btn" onclick="toggleLED()">Toggle LED</button>
-            <button class="btn" onclick="scanWiFi()">Scan WiFi</button>
-            <button class="btn" onclick="restartDevice()">Restart Device</button>
-        </div>
-        
-        <div class="alert alert-success" id="status-message">
-            System online and monitoring...
-        </div>
-        
-        <div class="log-area" id="logs">
-            Connecting to system...<br>
-        </div>
-    </div>
-
-    <script>
-        function updateStatus() {
-            fetch('/api/status')
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('uptime').textContent = data.uptime;
-                    document.getElementById('heap').textContent = data.freeHeap.toLocaleString();
-                    document.getElementById('wifi').textContent = data.wifiRSSI;
-                    document.getElementById('led').textContent = data.ledStatus ? 'ON' : 'OFF';
-                    
-                    // Add to log
-                    const logs = document.getElementById('logs');
-                    const timestamp = new Date().toLocaleTimeString();
-                    logs.innerHTML += `[${timestamp}] Status updated - Heap: ${data.freeHeap}, RSSI: ${data.wifiRSSI}<br>`;
-                    logs.scrollTop = logs.scrollHeight;
-                })
-                .catch(error => {
-                    console.error('Error:', error);
-                    document.getElementById('status-message').className = 'alert alert-warning';
-                    document.getElementById('status-message').textContent = 'Connection error - retrying...';
-                });
-        }
-        
-        function toggleLED() {
-            fetch('/api/led/toggle', {method: 'POST'})
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('status-message').textContent = `LED ${data.status}`;
-                });
-        }
-        
-        function scanWiFi() {
-            document.getElementById('status-message').textContent = 'Scanning WiFi networks...';
-            fetch('/api/wifi/scan', {method: 'POST'})
-                .then(response => response.json())
-                .then(data => {
-                    document.getElementById('status-message').textContent = `Found ${data.networks} WiFi networks`;
-                });
-        }
-        
-        function restartDevice() {
-            if(confirm('Are you sure you want to restart the device?')) {
-                document.getElementById('status-message').textContent = 'Restarting device...';
-                fetch('/api/restart', {method: 'POST'});
-            }
-        }
-        
-        // Update status every 2 seconds
-        setInterval(updateStatus, 2000);
-        updateStatus(); // Initial load
-    </script>
-</body>
-</html>
-)rawliteral";
-    request->send(200, "text/html", html);
-  });
-
-  // API endpoint for system status
-  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request){
-    SystemStats stats;
-    stats.uptime = millis() / 1000;
-    stats.freeHeap = ESP.getFreeHeap();
-    stats.wifiRSSI = WiFi.RSSI();
-    stats.ledStatus = ledState;
-    stats.temperature = 25; // Placeholder
-    stats.motionDetected = false; // Placeholder
-    
-    JsonDocument doc;
-    doc["uptime"] = stats.uptime;
-    doc["freeHeap"] = stats.freeHeap;
-    doc["wifiRSSI"] = stats.wifiRSSI;
-    doc["ledStatus"] = stats.ledStatus;
-    doc["temperature"] = stats.temperature;
-    doc["motionDetected"] = stats.motionDetected;
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-  });
-
-  // API endpoint for LED control
-  server.on("/api/led/toggle", HTTP_POST, [](AsyncWebServerRequest *request){
-    ledState = !ledState;
-    digitalWrite(LED_BUILTIN, ledState);
-    
-    JsonDocument doc;
-    doc["status"] = ledState ? "ON" : "OFF";
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-  });
-
-  // API endpoint for WiFi scan
-  server.on("/api/wifi/scan", HTTP_POST, [](AsyncWebServerRequest *request){
-    int n = WiFi.scanNetworks();
-    
-    JsonDocument doc;
-    doc["networks"] = n;
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-  });
-
-  // API endpoint for device restart
-  server.on("/api/restart", HTTP_POST, [](AsyncWebServerRequest *request){
-    JsonDocument doc;
-    doc["status"] = "restarting";
-    
-    String response;
-    serializeJson(doc, response);
-    request->send(200, "application/json", response);
-    
-    delay(1000);
-    ESP.restart();
-  });
-
-  // Camera stream endpoint
-  server.on("/camera", HTTP_GET, handleCameraStream);
-  
-  // Camera capture endpoint
-  server.on("/api/camera/capture", HTTP_GET, [](AsyncWebServerRequest *request){
-    if (!cameraInitialized) {
-      request->send(500, "application/json", "{\"error\":\"Camera not initialized\"}");
-      return;
+    // Initialize system components
+    if (!initializeSystem()) {
+        handleError("System initialization failed");
+        return;
     }
     
-    camera_fb_t * fb = esp_camera_fb_get();
-    if (!fb) {
-      request->send(500, "application/json", "{\"error\":\"Camera capture failed\"}");
-      return;
-    }
+    current_state = STATE_IDLE;
+    Serial.println("System initialized successfully!");
+    Serial.println("Starting person detection...");
     
-    AsyncWebServerResponse *response = request->beginResponse(200, "image/jpeg", fb->buf, fb->len);
-    response->addHeader("Cache-Control", "no-cache");
-    request->send(response);
-    
-    esp_camera_fb_return(fb);
-  });
-
-  server.begin();
-  Serial.println("Web server started!");
-  
-  if (apMode) {
-    Serial.printf("Access monitoring system at: http://%s\n", WiFi.softAPIP().toString().c_str());
-    if (cameraInitialized) {
-      Serial.printf("Camera stream available at: http://%s/camera\n", WiFi.softAPIP().toString().c_str());
+    // Blink built-in LED to indicate ready
+    for (int i = 0; i < 3; i++) {
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(200);
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(200);
     }
-  } else if (wifiConnected) {
-    Serial.printf("Access monitoring system at: http://%s\n", WiFi.localIP().toString().c_str());
-    if (cameraInitialized) {
-      Serial.printf("Camera stream available at: http://%s/camera\n", WiFi.localIP().toString().c_str());
-    }
-  }
-}
-
-bool initCamera() {
-  DEBUG_PRINTLN("Configuring camera pins...");
-  
-  camera_config_t config;
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = Y2_GPIO_NUM;
-  config.pin_d1 = Y3_GPIO_NUM;
-  config.pin_d2 = Y4_GPIO_NUM;
-  config.pin_d3 = Y5_GPIO_NUM;
-  config.pin_d4 = Y6_GPIO_NUM;
-  config.pin_d5 = Y7_GPIO_NUM;
-  config.pin_d6 = Y8_GPIO_NUM;
-  config.pin_d7 = Y9_GPIO_NUM;
-  config.pin_xclk = XCLK_GPIO_NUM;
-  config.pin_pclk = PCLK_GPIO_NUM;
-  config.pin_vsync = VSYNC_GPIO_NUM;
-  config.pin_href = HREF_GPIO_NUM;
-  // Suppress deprecated warnings for camera pin configuration
-  #pragma GCC diagnostic push
-  #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  config.pin_sccb_sda = SIOD_GPIO_NUM;
-  config.pin_sccb_scl = SIOC_GPIO_NUM;
-  #pragma GCC diagnostic pop
-  
-  config.pin_pwdn = PWDN_GPIO_NUM;
-  config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-  
-  DEBUG_PRINTLN("Camera pin configuration:");
-  DEBUG_PRINTF("  XCLK: %d, PCLK: %d, VSYNC: %d, HREF: %d\n", 
-               config.pin_xclk, config.pin_pclk, config.pin_vsync, config.pin_href);
-  DEBUG_PRINTF("  SDA: %d, SCL: %d\n", config.pin_sccb_sda, config.pin_sccb_scl);
-  DEBUG_PRINTF("  Data pins: %d,%d,%d,%d,%d,%d,%d,%d\n", 
-               config.pin_d0, config.pin_d1, config.pin_d2, config.pin_d3,
-               config.pin_d4, config.pin_d5, config.pin_d6, config.pin_d7);
-  
-  // Frame size and quality settings
-  if(psramFound()){
-    config.frame_size = FRAMESIZE_UXGA; // 1600x1200
-    config.jpeg_quality = 10;
-    config.fb_count = 2;
-  } else {
-    config.frame_size = FRAMESIZE_SVGA; // 800x600
-    config.jpeg_quality = 12;
-    config.fb_count = 1;
-  }
-  
-  // Initialize camera with warning suppression
-  #pragma GCC diagnostic push
-  #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  esp_err_t err = esp_camera_init(&config);
-  #pragma GCC diagnostic pop
-  
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
-    lastError = "Camera init failed with error 0x" + String(err, HEX);
-    return false;
-  }
-  
-  // Get camera sensor
-  sensor_t * s = esp_camera_sensor_get();
-  if (s != NULL) {
-    // Initial sensor setup
-    s->set_brightness(s, 0);     // -2 to 2
-    s->set_contrast(s, 0);       // -2 to 2
-    s->set_saturation(s, 0);     // -2 to 2
-    s->set_special_effect(s, 0); // 0 to 6 (0-No Effect, 1-Negative, 2-Grayscale, 3-Red Tint, 4-Green Tint, 5-Blue Tint, 6-Sepia)
-    s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
-    s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
-    s->set_wb_mode(s, 0);        // 0 to 4 - if awb_gain enabled (0 - Auto, 1 - Sunny, 2 - Cloudy, 3 - Office, 4 - Home)
-    s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
-    s->set_aec2(s, 0);           // 0 = disable , 1 = enable
-    s->set_ae_level(s, 0);       // -2 to 2
-    s->set_aec_value(s, 300);    // 0 to 1200
-    s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
-    s->set_agc_gain(s, 0);       // 0 to 30
-    s->set_gainceiling(s, (gainceiling_t)0);  // 0 to 6
-    s->set_bpc(s, 0);            // 0 = disable , 1 = enable
-    s->set_wpc(s, 1);            // 0 = disable , 1 = enable
-    s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
-    s->set_lenc(s, 1);           // 0 = disable , 1 = enable
-    s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
-    s->set_vflip(s, 0);          // 0 = disable , 1 = enable
-    s->set_dcw(s, 1);            // 0 = disable , 1 = enable
-    s->set_colorbar(s, 0);       // 0 = disable , 1 = enable
-  }
-  
-  return true;
-}
-
-void handleCameraStream(AsyncWebServerRequest *request) {
-  if (!cameraInitialized) {
-    request->send(500, "text/plain", "Camera not initialized");
-    return;
-  }
-  
-  String html = R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>XIAO ESP32S3 SENSE - Camera Stream</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #000; color: white; text-align: center; }
-        .container { max-width: 800px; margin: 0 auto; }
-        .camera-view { margin: 20px 0; }
-        .camera-image { max-width: 100%; height: auto; border: 2px solid #333; border-radius: 10px; }
-        .controls { margin: 20px 0; }
-        .btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 5px; }
-        .btn:hover { background: #0056b3; }
-        .status { margin: 10px 0; padding: 10px; background: #1a1a1a; border-radius: 5px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>📹 XIAO ESP32S3 SENSE Camera</h1>
-        
-        <div class="camera-view">
-            <img id="camera-stream" class="camera-image" src="/api/camera/capture" alt="Camera Stream">
-        </div>
-        
-        <div class="controls">
-            <button class="btn" onclick="refreshImage()">Refresh Image</button>
-            <button class="btn" onclick="toggleAutoRefresh()">Toggle Auto Refresh</button>
-            <button class="btn" onclick="captureImage()">Capture & Save</button>
-        </div>
-        
-        <div class="status" id="status">
-            Camera stream active
-        </div>
-    </div>
-
-    <script>
-        let autoRefresh = true;
-        let refreshInterval;
-        
-        function refreshImage() {
-            const img = document.getElementById('camera-stream');
-            img.src = '/api/camera/capture?' + new Date().getTime();
-        }
-        
-        function toggleAutoRefresh() {
-            autoRefresh = !autoRefresh;
-            const status = document.getElementById('status');
-            
-            if (autoRefresh) {
-                refreshInterval = setInterval(refreshImage, 1000); // Refresh every second
-                status.textContent = 'Auto refresh ON (1 sec interval)';
-            } else {
-                clearInterval(refreshInterval);
-                status.textContent = 'Auto refresh OFF';
-            }
-        }
-        
-        function captureImage() {
-            refreshImage();
-            document.getElementById('status').textContent = 'Image captured!';
-        }
-        
-        // Start auto refresh
-        refreshInterval = setInterval(refreshImage, 1000);
-        
-        // Refresh image every second
-        setInterval(refreshImage, 1000);
-    </script>
-</body>
-</html>
-)rawliteral";
-  
-  request->send(200, "text/html", html);
 }
 
 void loop() {
-  unsigned long currentMillis = millis();
-  
-  // Blink LED every second
-  if (currentMillis - previousMillis >= interval) {
-    previousMillis = currentMillis;
-    ledState = !ledState;
-    digitalWrite(LED_BUILTIN, ledState);
+    unsigned long current_time = millis();
     
-    // Print status information
-    Serial.printf("Uptime: %lu ms | ", currentMillis);
-    Serial.printf("Free Heap: %d bytes | ", ESP.getFreeHeap());
-    Serial.printf("LED: %s | ", ledState ? "ON" : "OFF");
-    
-    if (wifiConnected && WiFi.status() == WL_CONNECTED) {
-      Serial.printf("WiFi RSSI: %d dBm", WiFi.RSSI());
-    } else if (apMode) {
-      Serial.printf("AP Mode | Connected clients: %d", WiFi.softAPgetStationNum());
-    } else {
-      Serial.print("WiFi: Disconnected");
-      wifiConnected = false;
+    switch (current_state) {
+        case STATE_IDLE:
+        case STATE_DETECTING:
+            // Perform AI inference at regular intervals
+            if (current_time - last_inference_time >= DETECTION_INTERVAL_MS) {
+                last_inference_time = current_time;
+                
+                camera_fb_t *fb = esp_camera_fb_get();
+                if (fb) {
+                    current_state = STATE_DETECTING;
+                    
+                    // Perform person detection
+                    if (detectPerson(fb)) {
+                        // Check cooldown period
+                        if (current_time - last_detection_time >= detection_cooldown_ms) {
+                            last_detection_time = current_time;
+                            Serial.println("Person detected! Triggering alert system...");
+                            processDetection();
+                        }
+                    }
+                    
+                    esp_camera_fb_return(fb);
+                    current_state = STATE_IDLE;
+                }
+            }
+            break;
+            
+        case STATE_ALERT_ACTIVE:
+            updateAlert();
+            break;
+            
+        case STATE_RECORDING:
+            updateRecording(nullptr);
+            break;
+            
+        case STATE_ERROR:
+            // Error state - blink built-in LED
+            digitalWrite(LED_BUILTIN, (current_time / 1000) % 2);
+            break;
     }
-    Serial.println();
-  }
-  
-  // Periodic WiFi scan every 30 seconds
-  if (currentMillis - previousScanMillis >= scanInterval) {
-    previousScanMillis = currentMillis;
-    Serial.println("\n=== WiFi Network Scan ===");
     
-    int n = WiFi.scanNetworks(false, false, false, 300);
-    Serial.printf("Found %d networks:\n", n);
-    
-    if (n == 0) {
-      Serial.println("No WiFi networks found!");
-    } else {
-      for (int i = 0; i < n; ++i) {
-        String encryption;
-        switch (WiFi.encryptionType(i)) {
-          case WIFI_AUTH_OPEN: encryption = "Open"; break;
-          case WIFI_AUTH_WEP: encryption = "WEP"; break;
-          case WIFI_AUTH_WPA_PSK: encryption = "WPA"; break;
-          case WIFI_AUTH_WPA2_PSK: encryption = "WPA2"; break;
-          case WIFI_AUTH_WPA_WPA2_PSK: encryption = "WPA/WPA2"; break;
-          case WIFI_AUTH_WPA2_ENTERPRISE: encryption = "WPA2-ENT"; break;
-          case WIFI_AUTH_WPA3_PSK: encryption = "WPA3"; break;
-          default: encryption = "Unknown"; break;
-        }
-        
-        Serial.printf("%2d: %-20s %3d dBm [%s] Ch:%d\n", 
-                      i + 1, 
-                      WiFi.SSID(i).c_str(), 
-                      WiFi.RSSI(i),
-                      encryption.c_str(),
-                      WiFi.channel(i));
-        
-        // Highlight our target SSID
-        if (WiFi.SSID(i) == ssid) {
-          Serial.printf("    *** TARGET SSID FOUND! Signal: %d dBm ***\n", WiFi.RSSI(i));
-        }
-      }
+    // Handle web server
+    delay(loop_delay_ms);
+}
+
+bool initializeSystem() {
+    Serial.println("Initializing camera...");
+    if (!initializeCamera()) {
+        return false;
     }
-    Serial.println("========================\n");
-  }
-  
-  // Check button press (active low)
-  static bool lastButtonState = HIGH;
-  bool currentButtonState = digitalRead(BUTTON_PIN);
-  
-  if (lastButtonState == HIGH && currentButtonState == LOW) {
-    Serial.println("Button pressed! Performing WiFi scan now...");
-    previousScanMillis = 0; // Force immediate scan
-    delay(100);
-  }
-  lastButtonState = currentButtonState;
-  
-  // Small delay to prevent overwhelming the serial output
-  delay(10);
+    
+    Serial.println("Initializing SD card...");
+    if (!initializeSDCard()) {
+        Serial.println("Warning: SD card initialization failed. Recording disabled.");
+    }
+    
+    Serial.println("Initializing WiFi...");
+    if (!initializeWiFi()) {
+        Serial.println("Warning: WiFi initialization failed. Network features disabled.");
+    }
+    
+    Serial.println("Setting up web server...");
+    setupWebServer();
+    
+    Serial.println("Initializing AI model...");
+    if (!initializeAI()) {
+        Serial.println("Warning: AI model initialization failed. Detection disabled.");
+    }
+    
+    return true;
 }
 
-// Debug functions implementation
-void debugSystemInfo() {
-  DEBUG_PRINTLN("=== System Information ===");
-  DEBUG_PRINTF("Chip Model: %s\n", ESP.getChipModel());
-  DEBUG_PRINTF("Chip Revision: %d\n", ESP.getChipRevision());
-  DEBUG_PRINTF("CPU Frequency: %d MHz\n", ESP.getCpuFreqMHz());
-  DEBUG_PRINTF("Flash Size: %d bytes\n", ESP.getFlashChipSize());
-  DEBUG_PRINTF("Free Heap: %d bytes\n", ESP.getFreeHeap());
-  DEBUG_PRINTF("PSRAM Found: %s\n", psramFound() ? "YES" : "NO");
-  if (psramFound()) {
-    DEBUG_PRINTF("PSRAM Size: %d bytes\n", ESP.getPsramSize());
-    DEBUG_PRINTF("Free PSRAM: %d bytes\n", ESP.getFreePsram());
-  }
-  DEBUG_PRINTLN("==========================");
+bool initializeCamera() {
+    esp_err_t err = esp_camera_init(&camera_config);
+    if (err != ESP_OK) {
+        Serial.printf("Camera init failed with error 0x%x\n", err);
+        return false;
+    }
+    
+    // Get camera sensor
+    sensor_t *s = esp_camera_sensor_get();
+    if (s) {
+        // Improve image quality settings
+        s->set_brightness(s, 0);     // -2 to 2
+        s->set_contrast(s, 0);       // -2 to 2
+        s->set_saturation(s, 0);     // -2 to 2
+        s->set_special_effect(s, 0); // 0 to 6 (0-No Effect, 1-Negative, 2-Grayscale...)
+        s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
+        s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
+        s->set_wb_mode(s, 0);        // 0 to 4 - if awb_gain enabled
+        s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
+        s->set_aec2(s, 0);           // 0 = disable , 1 = enable
+        s->set_ae_level(s, 0);       // -2 to 2
+        s->set_aec_value(s, 300);    // 0 to 1200
+        s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
+        s->set_agc_gain(s, 0);       // 0 to 30
+        s->set_gainceiling(s, (gainceiling_t)0); // 0 to 6
+        s->set_bpc(s, 0);            // 0 = disable , 1 = enable
+        s->set_wpc(s, 1);            // 0 = disable , 1 = enable
+        s->set_raw_gma(s, 1);        // 0 = disable , 1 = enable
+        s->set_lenc(s, 1);           // 0 = disable , 1 = enable
+        s->set_hmirror(s, 0);        // 0 = disable , 1 = enable
+        s->set_vflip(s, 0);          // 0 = disable , 1 = enable
+        s->set_dcw(s, 1);            // 0 = disable , 1 = enable
+        s->set_colorbar(s, 0);       // 0 = disable , 1 = enable
+    }
+    
+    Serial.println("Camera initialized successfully");
+    return true;
 }
 
-void debugWiFiInfo() {
-  DEBUG_PRINTLN("=== WiFi Information ===");
-  DEBUG_PRINTF("WiFi MAC Address: %s\n", WiFi.macAddress().c_str());
-  DEBUG_PRINTF("WiFi Mode: %d\n", WiFi.getMode());
-  DEBUG_PRINTF("WiFi Status: %d\n", WiFi.status());
-  DEBUG_PRINTLN("========================");
+bool initializeSDCard() {
+    if (!SD_MMC.begin("/sdcard", true)) {
+        Serial.println("SD Card Mount Failed");
+        return false;
+    }
+    
+    uint8_t cardType = SD_MMC.cardType();
+    if (cardType == CARD_NONE) {
+        Serial.println("No SD card attached");
+        return false;
+    }
+    
+    // Create recordings directory
+    if (!SD_MMC.exists(recording_path)) {
+        SD_MMC.mkdir(recording_path);
+    }
+    
+    uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+    Serial.printf("SD Card Size: %lluMB\n", cardSize);
+    
+    return true;
 }
 
-void debugCameraInfo() {
-  DEBUG_PRINTLN("=== Camera Information ===");
-  DEBUG_PRINTF("Camera Pin Configuration:\n");
-  DEBUG_PRINTF("  XCLK: %d, PCLK: %d\n", XCLK_GPIO_NUM, PCLK_GPIO_NUM);
-  DEBUG_PRINTF("  VSYNC: %d, HREF: %d\n", VSYNC_GPIO_NUM, HREF_GPIO_NUM);
-  DEBUG_PRINTF("  SDA: %d, SCL: %d\n", SIOD_GPIO_NUM, SIOC_GPIO_NUM);
-  DEBUG_PRINTF("  Data: %d,%d,%d,%d,%d,%d,%d,%d\n", 
-               Y2_GPIO_NUM, Y3_GPIO_NUM, Y4_GPIO_NUM, Y5_GPIO_NUM,
-               Y6_GPIO_NUM, Y7_GPIO_NUM, Y8_GPIO_NUM, Y9_GPIO_NUM);
-  DEBUG_PRINTLN("==========================");
+bool initializeWiFi() {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(wifi_ssid, wifi_password);
+    
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        delay(1000);
+        Serial.print(".");
+        attempts++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println();
+        Serial.print("WiFi connected! IP address: ");
+        Serial.println(WiFi.localIP());
+        
+        // Initialize time
+        configTime(timezone_offset_hours * 3600, 0, ntp_server);
+        
+        return true;
+    } else {
+        Serial.println("WiFi connection failed");
+        return false;
+    }
+}
+
+bool initializeAI() {
+    // TODO: Initialize TensorFlow Lite Micro model
+    // This is a placeholder for AI model initialization
+    Serial.println("AI model initialization - TODO: Implement TFLite model loading");
+    return true;
+}
+
+void setupWebServer() {
+    // Root page
+    server.on("/", HTTP_GET, handleRoot);
+    
+    // Streaming endpoint
+    server.on("/stream", HTTP_GET, handleStream);
+    
+    // Capture endpoint
+    server.on("/capture", HTTP_GET, handleCapture);
+    
+    // System status endpoint
+    server.on("/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String json = "{";
+        json += "\"state\":\"" + String(current_state) + "\",";
+        json += "\"alert_active\":" + String(alert_system.alert_triggered ? "true" : "false") + ",";
+        json += "\"recording_active\":" + String(recording_system.recording_active ? "true" : "false") + ",";
+        json += "\"uptime\":" + String(millis()) + ",";
+        json += "\"free_heap\":" + String(ESP.getFreeHeap());
+        json += "}";
+        request->send(200, "application/json", json);
+    });
+    
+    server.begin();
+    Serial.println("Web server started");
+}
+
+bool detectPerson(camera_fb_t *fb) {
+    // TODO: Implement actual AI inference using TensorFlow Lite Micro
+    // This is a placeholder that simulates detection
+    
+    // For now, randomly trigger detection for testing (remove this in production)
+    static int detection_counter = 0;
+    detection_counter++;
+    
+    // Simulate detection every 30 inference cycles (for testing)
+    if (detection_counter % 30 == 0) {
+        return true;
+    }
+    
+    return false;
+}
+
+void processDetection() {
+    current_state = STATE_ALERT_ACTIVE;
+    startAlert();
+    
+    // Send LINE message
+    if (enable_line_messaging && WiFi.status() == WL_CONNECTED) {
+        String message = "【防犯通知】人物を検知しました\n";
+        message += "時刻: " + String(getCurrentTime()) + "\n";
+        message += "映像ストリーミング: " + getStreamingURL();
+        sendLINEMessage(message);
+    }
+    
+    // Start recording
+    if (enable_recording) {
+        startRecording();
+    }
+}
+
+void startAlert() {
+    alert_system.alert_triggered = true;
+    alert_system.alert_start_time = millis();
+    alert_system.last_led_toggle = millis();
+    alert_system.buzzer_active = enable_buzzer;
+    alert_system.led1_state = true;
+    alert_system.led2_state = false;
+    
+    // Start buzzer
+    if (enable_buzzer) {
+        controlBuzzer(true);
+    }
+    
+    // Set initial LED states
+    if (enable_led_alerts) {
+        digitalWrite(LED1_PIN, alert_system.led1_state);
+        digitalWrite(LED2_PIN, alert_system.led2_state);
+    }
+    
+    Serial.println("Alert system activated");
+}
+
+void updateAlert() {
+    unsigned long current_time = millis();
+    
+    // Check if alert duration has elapsed
+    if (current_time - alert_system.alert_start_time >= ALERT_DURATION_MS) {
+        stopAlert();
+        return;
+    }
+    
+    // Update LED blinking
+    if (enable_led_alerts && 
+        current_time - alert_system.last_led_toggle >= LED_BLINK_INTERVAL_MS) {
+        alert_system.last_led_toggle = current_time;
+        
+        // Toggle LEDs in opposite phases
+        alert_system.led1_state = !alert_system.led1_state;
+        alert_system.led2_state = !alert_system.led2_state;
+        
+        digitalWrite(LED1_PIN, alert_system.led1_state);
+        digitalWrite(LED2_PIN, alert_system.led2_state);
+    }
+}
+
+void stopAlert() {
+    alert_system.alert_triggered = false;
+    alert_system.buzzer_active = false;
+    
+    // Turn off buzzer
+    controlBuzzer(false);
+    
+    // Turn off LEDs
+    digitalWrite(LED1_PIN, LOW);
+    digitalWrite(LED2_PIN, LOW);
+    
+    current_state = STATE_IDLE;
+    Serial.println("Alert system deactivated");
+}
+
+void controlBuzzer(bool state) {
+    if (state) {
+        // Generate PWM tone for buzzer
+        ledcSetup(0, buzzer_frequency, 8);
+        ledcAttachPin(BUZZER_PIN, 0);
+        ledcWrite(0, 128); // 50% duty cycle
+    } else {
+        ledcWrite(0, 0);
+        ledcDetachPin(BUZZER_PIN);
+        digitalWrite(BUZZER_PIN, LOW);
+    }
+}
+
+void startRecording() {
+    recording_system.recording_active = true;
+    recording_system.recording_start_time = millis();
+    recording_system.current_filename = generateFilename();
+    
+    current_state = STATE_RECORDING;
+    Serial.println("Recording started: " + recording_system.current_filename);
+}
+
+void updateRecording(camera_fb_t *fb) {
+    unsigned long current_time = millis();
+    
+    // Check if recording duration has elapsed
+    if (current_time - recording_system.recording_start_time >= RECORDING_DURATION_MS) {
+        stopRecording();
+        return;
+    }
+    
+    // TODO: Implement actual video recording to SD card
+    // This would involve writing frames to a video file format
+}
+
+void stopRecording() {
+    recording_system.recording_active = false;
+    
+    if (recording_system.video_file) {
+        recording_system.video_file.close();
+    }
+    
+    current_state = STATE_IDLE;
+    Serial.println("Recording stopped: " + recording_system.current_filename);
+}
+
+String generateFilename() {
+    time_t now = time(0);
+    struct tm *timeinfo = localtime(&now);
+    
+    char filename[50];
+    strftime(filename, sizeof(filename), "rec_%Y%m%d_%H%M%S.avi", timeinfo);
+    
+    return recording_path + String(filename);
+}
+
+void sendLINEMessage(String message) {
+    if (WiFi.status() != WL_CONNECTED) return;
+    
+    HTTPClient http;
+    http.begin("https://api.line.me/v2/bot/message/push");
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", "Bearer " + String(line_channel_access_token));
+    
+    // Create JSON payload
+    DynamicJsonDocument doc(1024);
+    doc["to"] = line_user_id;
+    
+    JsonArray messages = doc.createNestedArray("messages");
+    JsonObject textMessage = messages.createNestedObject();
+    textMessage["type"] = "text";
+    textMessage["text"] = message;
+    
+    String jsonString;
+    serializeJson(doc, jsonString);
+    
+    int httpResponseCode = http.POST(jsonString);
+    
+    if (httpResponseCode == 200) {
+        Serial.println("LINE message sent successfully");
+    } else {
+        Serial.printf("LINE message failed with code: %d\n", httpResponseCode);
+        String response = http.getString();
+        Serial.println("Response: " + response);
+    }
+    
+    http.end();
+}
+
+String getStreamingURL() {
+    if (WiFi.status() == WL_CONNECTED) {
+        return "http://" + WiFi.localIP().toString() + "/stream";
+    }
+    return "Stream unavailable";
+}
+
+void handleRoot(AsyncWebServerRequest *request) {
+    String html = "<!DOCTYPE html><html><head><title>Security Camera</title></head>";
+    html += "<body><h1>XIAO ESP32S3 Security Camera</h1>";
+    html += "<p><a href='/stream'>Live Stream</a></p>";
+    html += "<p><a href='/capture'>Capture Image</a></p>";
+    html += "<p><a href='/status'>System Status</a></p>";
+    html += "</body></html>";
+    
+    request->send(200, "text/html", html);
+}
+
+void handleStream(AsyncWebServerRequest *request) {
+    // TODO: Implement MJPEG streaming
+    request->send(501, "text/plain", "Streaming not implemented yet");
+}
+
+void handleCapture(AsyncWebServerRequest *request) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (fb) {
+        AsyncWebServerResponse *response = request->beginResponse_P(200, "image/jpeg", fb->buf, fb->len);
+        response->addHeader("Content-Disposition", "inline; filename=capture.jpg");
+        request->send(response);
+        esp_camera_fb_return(fb);
+    } else {
+        request->send(500, "text/plain", "Camera capture failed");
+    }
+}
+
+void handleError(String error_message) {
+    Serial.println("ERROR: " + error_message);
+    current_state = STATE_ERROR;
+    
+    // Send error notification if possible
+    if (WiFi.status() == WL_CONNECTED && enable_line_messaging) {
+        sendLINEMessage("【システムエラー】" + error_message);
+    }
+}
+
+unsigned long getCurrentTime() {
+    return millis() / 1000;
+}
+
+void printSystemStatus() {
+    Serial.println("\n=== System Status ===");
+    Serial.println("State: " + String(current_state));
+    Serial.println("Alert Active: " + String(alert_system.alert_triggered));
+    Serial.println("Recording Active: " + String(recording_system.recording_active));
+    Serial.println("Free Heap: " + String(ESP.getFreeHeap()));
+    Serial.println("Uptime: " + String(millis() / 1000) + " seconds");
+    Serial.println("====================\n");
 }

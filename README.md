@@ -1,179 +1,195 @@
-<<<<<<< HEAD
-# Xiao ESP32S3 プロジェクト
+# XIAO ESP32S3 Sense 防犯監視システム
 
-このプロジェクトは、Seeed Studio XIAO ESP32S3開発ボード用のPlatformIOプロジェクトです。
+🎯 **目的**  
+人物をAI推論で検知し、即座に警告・通知・記録を行う防犯監視システム
 
-## 機能
+## 🧩 機能仕様
 
-- **LED制御**: 内蔵LED（Pin 21）の点滅制御
-- **WiFi接続**: WiFiネットワークへの自動接続
-- **シリアル通信**: 115200bpsでの詳細なステータス出力
-- **ボタン入力**: ブートボタン（Pin 0）による再起動機能
-- **システム監視**: メモリ使用量、WiFi信号強度の表示
+| 機能 | 内容 |
+|------|------|
+| 人物検知 | AI推論モデル（TFLite Micro）により人物を検出 |
+| 警告出力 | 検知後、電子ブザーを10秒間鳴動 |
+| LED点滅 | 2個のLEDを0.5秒周期で交互に点滅（逆位相）、10秒間継続 |
+| LINE通知 | 検知時にLINE Messaging APIでメッセージを送信 |
+| 映像記録 | 検知後の30秒間の映像をSDカードに保存（動画形式） |
+| ストリーミングリンク | LINE通知にストリーミングURLを含めて送信 |
+| 電源 | USB給電またはソーラ給電（自動切替または手動選択） |
 
-## ハードウェア仕様
+## 🔧 ハードウェア構成
 
-- **マイコン**: ESP32-S3 (240MHz, デュアルコア)
-- **メモリ**: 320KB RAM, 8MB Flash
-- **WiFi**: 802.11 b/g/n対応
-- **内蔵LED**: Pin 21
-- **ブートボタン**: Pin 0
+| デバイス | 接続先 | 備考 |
+|----------|--------|------|
+| XIAO ESP32S3 Sense | 中核マイコン | カメラ・IMU・マイク内蔵 |
+| 電子ブザー | GPIO D2 | 10秒間鳴動 |
+| LED ×2 | GPIO D3, D4 | 0.5秒周期で逆位相点滅 |
+| microSDカード | SPI接続 | 映像保存用 |
+| 電源 | USB-C / ソーラ | 5V入力、電源切替対応 |
 
-## セットアップ
+## 🧠 ソフトウェア構成
 
-### 1. 依存関係のインストール
+- **esp32-camera**: OV2640制御、JPEG/動画取得
+- **esp-tflite-micro**: 人物検出モデル（int8量子化）
+- **SD_MMC**: SDカードへの動画保存
+- **HTTPClient**: LINE Messaging API送信
+- **ESPAsyncWebServer**: ストリーミングURL提供
+- **FreeRTOS**: LED点滅・ブザー・録画・通知を並列処理
 
-```powershell
-pip install --user platformio
+## 🔄 処理フロー（人物検知イベント）
+
+```
+[起動]
+  └─ Wi-Fi接続 → AIモデル初期化 → カメラ準備完了
+
+[人物検知]
+  └─ AI推論で人物を検出（推論周期：1秒）
+
+[検知後の処理（並列）]
+  ├─ 電子ブザー ON（10秒）
+  ├─ LED1: ON/OFF 0.5秒周期（10秒）
+  ├─ LED2: OFF/ON 0.5秒周期（10秒） ← LED1と逆位相
+  ├─ LINE Notify送信（テキスト＋ストリーミングURL）
+  └─ 映像録画開始（30秒） → SDカード保存
+
+[待機]
+  └─ 次の検知までAI推論ループ継続
 ```
 
-### 2. プロジェクトのビルド
+## 📡 通知内容（LINE）
 
-```powershell
-# プロジェクトディレクトリに移動
-cd "c:\Users\DELL\OneDrive\ドキュメント\PlatformIO\Projects\XiaoESP32S3"
-
-# ビルド実行
-C:\Users\DELL\AppData\Roaming\Python\Python310\Scripts\platformio.exe run
+```
+【防犯通知】人物を検知しました
+時刻: 2025-10-13 14:30:25
+映像ストリーミング: http://192.168.1.100/stream
 ```
 
-### 3. コードのアップロード
+## 🛠️ セットアップ手順
 
-デバイスを接続後、以下のコマンドでアップロード：
+### 1. ハードウェア接続
 
-```powershell
-C:\Users\DELL\AppData\Roaming\Python\Python310\Scripts\platformio.exe run --target upload
+```
+XIAO ESP32S3 Sense:
+├─ ブザー → D2 (GPIO 2)
+├─ LED1 → D3 (GPIO 3)  
+├─ LED2 → D4 (GPIO 4)
+└─ microSD → 内蔵スロット
 ```
 
-### 4. シリアル監視
+### 2. ソフトウェア設定
 
-```powershell
-C:\Users\DELL\AppData\Roaming\Python\Python310\Scripts\platformio.exe device monitor
+1. **PlatformIO** でプロジェクトを開く
+2. `include/config.h` を編集:
+   ```cpp
+   const char* wifi_ssid = "あなたのWiFi名";
+   const char* wifi_password = "あなたのWiFiパスワード";
+   const char* line_channel_access_token = "あなたのチャンネルアクセストークン";
+   const char* line_user_id = "送信先のユーザーID";
+   ```
+3. LINE Messaging APIの設定:
+   - [LINE Developers Console](https://developers.line.biz/console/) でチャンネル作成
+   - Messaging API設定でChannel Access Tokenを取得
+   - 送信先ユーザーのUser IDを取得
+4. ビルド＆アップロード
+
+### 3. 動作確認
+
+1. シリアルモニター（115200bps）で起動ログを確認
+2. WiFi接続とIPアドレスを確認
+3. ブラウザで `http://[IPアドレス]/` にアクセス
+4. `/stream` でライブストリーミング確認
+5. 人物検知でアラート動作確認
+
+## 📁 プロジェクト構造
+
+```
+XiaoESP32S3_SecurityCamera/
+├── platformio.ini          # PlatformIO設定
+├── include/
+│   ├── security_camera.h   # メインヘッダー
+│   └── config.h           # 設定ファイル
+├── src/
+│   └── main.cpp           # メインプログラム
+├── lib/                   # カスタムライブラリ
+├── data/                  # SPIFFS用データ
+├── models/                # AIモデルファイル
+└── web/                   # Webインターフェース
 ```
 
-## WiFi設定
+## 🔧 カスタマイズ
 
-`src/main.cpp`の以下の行を編集してWiFi認証情報を設定してください：
-
+### 検知感度調整
 ```cpp
-const char* ssid = "YourWiFiSSID";        // WiFi SSID
-const char* password = "YourWiFiPassword"; // WiFiパスワード
+// config.h
+const float detection_threshold = 0.7;  // 0.0-1.0（高いほど厳しい）
+const int detection_cooldown_ms = 5000; // 連続検知防止時間
 ```
 
-## 動作
+### アラート設定
+```cpp
+// config.h
+const bool enable_buzzer = true;        // ブザーON/OFF
+const bool enable_led_alerts = true;    // LED警告ON/OFF
+const bool enable_line_notify = true;   // LINE通知ON/OFF
+const bool enable_recording = true;     // 録画ON/OFF
+```
 
-1. **起動時**: システム情報とWiFi接続状況を表示
-2. **動作中**: 1秒間隔でLED点滅、システム状態をシリアル出力
-3. **ボタン操作**: ブートボタン押下で3秒後に再起動
+### カメラ設定
+```cpp
+// config.h
+const int camera_frame_size = FRAMESIZE_SVGA;  // 解像度
+const int camera_jpeg_quality = 12;            // 画質(0-63)
+```
 
-## トラブルシューティング
+## 🚀 今後の展開候補
 
-### ビルドエラー
+- [ ] Web UIで録画映像の再生・履歴管理
+- [ ] Firebase連携によるクラウド保存
+- [ ] 音声警告（I2S DAC）やIMU連動アラート
+- [ ] 電源切替の自動判定（USB vs ソーラ）
+- [ ] 顔認識による人物識別
+- [ ] モーション検知との組み合わせ
+- [ ] 夜間赤外線撮影対応
 
-- PlatformIOが見つからない場合は、パスを確認してフルパスで実行
-- 必要に応じて`platformio.ini`の設定を調整
+## 📊 システム要件
 
-### アップロードエラー
+- **RAM使用量**: 約100KB（PSRAM使用）
+- **Flash使用量**: 約1.5MB
+- **消費電力**: 約200mA（WiFi通信時）
+- **SD容量**: 最低8GB推奨
+- **WiFi**: 2.4GHz 802.11b/g/n
 
-- USBケーブルとポート接続を確認
-- デバイスドライバが正しくインストールされているか確認
-- `platformio.ini`の`upload_port`を手動設定
+## 🔍 トラブルシューティング
 
-### WiFi接続問題
+### カメラが起動しない
+```cpp
+// カメラピン設定を確認
+// XIAO ESP32S3 Senseの場合、既定義のピン配置を使用
+```
 
-- SSID・パスワードが正しいか確認
-- 2.4GHz帯のWiFiを使用（5GHz非対応）
-- WiFi電波強度を確認
+### WiFi接続できない
+```cpp
+// config.h でSSID/パスワードを確認
+// 2.4GHz帯のWiFiを使用しているか確認
+```
 
-## カスタマイズ
+### LINE通知が届かない
+```cpp
+// チャンネルアクセストークンが正しいか確認
+// ユーザーIDが正しいか確認
+// Messaging APIが有効になっているか確認
+// Bot設定でWebhookが正しく設定されているか確認
+```
 
-- `platformio.ini`: ビルド設定、ライブラリ依存関係
-- `src/main.cpp`: メインアプリケーションロジック
-- ピン配置やタイミング調整が可能
+### 録画ファイルが作成されない
+```cpp
+// SDカードがマウントされているか確認
+// ファイル名の生成が正しいか確認
+```
 
-## ライセンス
+## 📝 ライセンス
 
 このプロジェクトはMITライセンスの下で公開されています。
-=======
-# README.md
-# 自動運転ミニカー予選タイム計測システム
 
-## 概要
-ラズベリーパイ5 + LOGICOOL C270 x2台を使用した自動運転ミニカーの予選タイム計測システムです。
+## 👤 作成者
 
-## 主な機能
-- 🎯 **デュアルカメラシステム**
-  - 俯瞰カメラ: コース全体を監視（メイン表示）
-  - スタートライン用カメラ: 車両通過検出（左下小窓表示）
-
-- ⏱️ **自動ラップタイム計測**
-  - スタートライン通過の自動検出
-  - 3周分のラップタイム測定
-  - リアルタイム表示と自動保存
-
-- 🎵 **効果音システム**
-  - レーススタート時の効果音
-  - ゴール時の効果音
-
-- 📊 **データ管理**
-  - ラップタイム自動保存（JSON形式）
-  - レース結果の詳細記録
-
-## システム要件
-- Raspberry Pi 5
-- LOGICOOL C270 Webカメラ x2台
-- Python 3.8+
-- OpenCV, NumPy, Pygame
-
-## インストール
-```bash
-cd C:\Users\DELL\20250928_Python_LAPTIME_WEBCAM
-pip install -r requirements.txt
-```
-
-## 使用方法
-```bash
-python main_laptime_system.py
-```
-
-### 操作方法
-- **'r'キー**: レースリセット
-- **'q'キー**: システム終了
-
-### システムの流れ
-1. カメラ初期化とキャリブレーション
-2. 車両がスタートラインを通過 → レース開始
-3. 各ラップの自動計測と表示
-4. 3周目の半周で画面上のタイマー非表示
-5. 3周完了で自動結果保存
-
-## ファイル構成
-```
-C:\Users\DELL\20250928_Python_LAPTIME_WEBCAM\
-├── main_laptime_system.py   # メインプログラム
-├── config.json              # システム設定
-├── requirements.txt         # 必要ライブラリ
-├── README.md               # このファイル
-├── sounds\                 # 効果音ファイル
-│   ├── start.wav
-│   └── finish.wav
-└── data\                   # レース結果保存先
-    └── race_result_*.json
-```
-
-## 設定項目
-`config.json`で各種パラメータを調整可能：
-- カメラ解像度・FPS
-- 検出感度設定
-- 表示レイアウト
-- 効果音設定
-
-## トラブルシューティング
-- カメラが認識されない場合、USBポートを確認
-- 検出感度が適切でない場合、`config.json`の`detection_settings`を調整
-- 音が出ない場合、音量設定とスピーカー接続を確認
-
-## 開発者向け
-システムの拡張や改良については、各クラスのメソッドを参照してください。
-特にスタートライン検出アルゴリズムは環境に応じてカスタマイズが必要です。
->>>>>>> 62bc938e0014b1c05c884bb8ba69f934c8036058
+Security Camera System Project  
+Date: 2025-10-13

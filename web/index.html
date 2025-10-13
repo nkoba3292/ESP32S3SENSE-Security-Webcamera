@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XIAO ESP32S3 Security Camera</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .header {
+            text-align: center;
+            background-color: #2c3e50;
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .status-panel {
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .video-panel {
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .btn {
+            padding: 10px 20px;
+            background-color: #3498db;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .btn:hover {
+            background-color: #2980b9;
+        }
+        .btn.alert {
+            background-color: #e74c3c;
+        }
+        .btn.alert:hover {
+            background-color: #c0392b;
+        }
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            margin: 10px 0;
+            padding: 5px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .status-value {
+            font-weight: bold;
+        }
+        .status-active {
+            color: #27ae60;
+        }
+        .status-inactive {
+            color: #95a5a6;
+        }
+        .status-alert {
+            color: #e74c3c;
+        }
+        #stream-container {
+            max-width: 100%;
+            overflow: hidden;
+        }
+        #stream-image {
+            max-width: 100%;
+            height: auto;
+            border: 2px solid #bdc3c7;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🛡️ XIAO ESP32S3 Security Camera</h1>
+        <p>AI-Powered Person Detection System</p>
+    </div>
+
+    <div class="status-panel">
+        <h2>System Status</h2>
+        <div class="status-item">
+            <span>System State:</span>
+            <span id="system-state" class="status-value">Loading...</span>
+        </div>
+        <div class="status-item">
+            <span>Alert Active:</span>
+            <span id="alert-status" class="status-value">Loading...</span>
+        </div>
+        <div class="status-item">
+            <span>Recording Active:</span>
+            <span id="recording-status" class="status-value">Loading...</span>
+        </div>
+        <div class="status-item">
+            <span>Uptime:</span>
+            <span id="uptime" class="status-value">Loading...</span>
+        </div>
+        <div class="status-item">
+            <span>Free Memory:</span>
+            <span id="free-memory" class="status-value">Loading...</span>
+        </div>
+        <div class="status-item">
+            <span>Last Update:</span>
+            <span id="last-update" class="status-value">Never</span>
+        </div>
+    </div>
+
+    <div class="video-panel">
+        <h2>Live Stream</h2>
+        <div id="stream-container">
+            <img id="stream-image" src="/capture" alt="Camera Stream" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQwIiBoZWlnaHQ9IjQ4MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjY2NjIi8+CiAgPHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxOCIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPkNhbWVyYSBOb3QgQXZhaWxhYmxlPC90ZXh0Pgo8L3N2Zz4K';">
+        </div>
+        <br>
+        <div class="controls">
+            <button class="btn" onclick="refreshImage()">📷 Capture</button>
+            <a href="/stream" class="btn" target="_blank">🎥 Live Stream</a>
+            <button class="btn" onclick="toggleAutoRefresh()">🔄 Auto Refresh</button>
+        </div>
+    </div>
+
+    <div class="status-panel">
+        <h2>System Controls</h2>
+        <div class="controls">
+            <button class="btn" onclick="refreshStatus()">🔄 Refresh Status</button>
+            <button class="btn alert" onclick="testAlert()">🚨 Test Alert</button>
+            <a href="/status" class="btn" target="_blank">📊 Raw Status</a>
+        </div>
+    </div>
+
+    <script>
+        let autoRefreshImage = false;
+        let imageRefreshInterval;
+        let statusRefreshInterval;
+
+        // Start status auto-refresh
+        statusRefreshInterval = setInterval(refreshStatus, 5000);
+        refreshStatus(); // Initial load
+
+        function refreshStatus() {
+            fetch('/status')
+                .then(response => response.json())
+                .then(data => {
+                    // Update system state
+                    const stateElement = document.getElementById('system-state');
+                    const stateText = getStateText(data.state);
+                    stateElement.textContent = stateText;
+                    stateElement.className = 'status-value ' + getStateClass(data.state);
+
+                    // Update alert status
+                    const alertElement = document.getElementById('alert-status');
+                    alertElement.textContent = data.alert_active ? 'ACTIVE' : 'Inactive';
+                    alertElement.className = 'status-value ' + (data.alert_active ? 'status-alert' : 'status-inactive');
+
+                    // Update recording status
+                    const recordingElement = document.getElementById('recording-status');
+                    recordingElement.textContent = data.recording_active ? 'RECORDING' : 'Stopped';
+                    recordingElement.className = 'status-value ' + (data.recording_active ? 'status-active' : 'status-inactive');
+
+                    // Update uptime
+                    document.getElementById('uptime').textContent = formatUptime(data.uptime);
+
+                    // Update free memory
+                    document.getElementById('free-memory').textContent = formatBytes(data.free_heap);
+
+                    // Update last update time
+                    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+                })
+                .catch(error => {
+                    console.error('Error fetching status:', error);
+                    document.getElementById('system-state').textContent = 'Connection Error';
+                    document.getElementById('system-state').className = 'status-value status-alert';
+                });
+        }
+
+        function getStateText(state) {
+            const states = {
+                '0': 'Initializing',
+                '1': 'Idle',
+                '2': 'Detecting',
+                '3': 'Alert Active',
+                '4': 'Recording',
+                '5': 'Error'
+            };
+            return states[state] || 'Unknown';
+        }
+
+        function getStateClass(state) {
+            switch(state) {
+                case '0': return 'status-inactive'; // Initializing
+                case '1': return 'status-active';   // Idle
+                case '2': return 'status-active';   // Detecting
+                case '3': return 'status-alert';    // Alert Active
+                case '4': return 'status-active';   // Recording
+                case '5': return 'status-alert';    // Error
+                default: return 'status-inactive';
+            }
+        }
+
+        function formatUptime(milliseconds) {
+            const seconds = Math.floor(milliseconds / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
+            const days = Math.floor(hours / 24);
+
+            if (days > 0) {
+                return `${days}d ${hours % 24}h ${minutes % 60}m`;
+            } else if (hours > 0) {
+                return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+            } else if (minutes > 0) {
+                return `${minutes}m ${seconds % 60}s`;
+            } else {
+                return `${seconds}s`;
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function refreshImage() {
+            const img = document.getElementById('stream-image');
+            img.src = '/capture?' + new Date().getTime();
+        }
+
+        function toggleAutoRefresh() {
+            autoRefreshImage = !autoRefreshImage;
+            const button = event.target;
+            
+            if (autoRefreshImage) {
+                button.textContent = '⏸️ Stop Auto';
+                button.style.backgroundColor = '#e74c3c';
+                imageRefreshInterval = setInterval(refreshImage, 2000);
+            } else {
+                button.textContent = '🔄 Auto Refresh';
+                button.style.backgroundColor = '#3498db';
+                clearInterval(imageRefreshInterval);
+            }
+        }
+
+        function testAlert() {
+            // This would trigger a test alert on the device
+            // For now, just show a message
+            alert('Test alert function - not implemented yet');
+        }
+
+        // Auto-refresh image every 5 seconds initially
+        setInterval(refreshImage, 5000);
+    </script>
+</body>
+</html>
