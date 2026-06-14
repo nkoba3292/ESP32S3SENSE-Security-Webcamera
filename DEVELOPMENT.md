@@ -2,6 +2,15 @@
 
 ## Development Notes
 
+### 2026-01-01 - Major Feature Implementation
+- ✅ Implemented motion detection using frame difference algorithm
+- ✅ Implemented MJPEG video recording to SD card (30 seconds duration)
+- ✅ Implemented real-time MJPEG streaming endpoint
+- ✅ Enhanced web interface with live preview and system status
+- ✅ Improved state management for concurrent alert and recording
+- ✅ Recording saves at 10 FPS to optimize SD card usage
+- ✅ Added frame counting and detailed logging
+
 ### 2025-10-13 - Initial Project Creation
 - Created PlatformIO project structure
 - Implemented basic security camera functionality
@@ -31,23 +40,23 @@
 - ✅ Web server with live streaming endpoint
 - ✅ Alert system (buzzer + LED blinking)
 - ✅ LINE Messaging API integration
-- ⏳ AI person detection (placeholder implemented)
-- ⏳ Video recording to SD card (framework ready)
-- ⏳ TensorFlow Lite model integration
+- ✅ Motion detection (frame difference method)
+- ✅ Video recording to SD card (MJPEG format)
+- ✅ MJPEG streaming
+- ✅ Web interface with live preview
 
 ### Next Steps
-1. Integrate actual TensorFlow Lite Micro model for person detection
-2. Implement proper video recording functionality
-3. Add MJPEG streaming support
-4. Optimize power consumption
-5. Add configuration web interface
-6. Implement recording playback feature
+1. Optimize motion detection sensitivity
+2. Add advanced AI detection (ESP-WHO or TFLite)
+3. Implement recording playback feature
+4. Add configuration web interface
+5. Optimize power consumption for battery operation
+6. Add motion detection zone configuration
 
 ### Known Issues
-- AI detection currently uses placeholder (random detection)
-- Video recording saves framework but not actual video data
-- MJPEG streaming not yet implemented
-- Need to add proper error handling for SD card operations
+- Motion detection may have false positives - sensitivity tuning needed
+- MJPEG file size can grow large - need file rotation
+- Memory usage should be monitored during extended operation
 
 ### Testing
 - Serial output at 115200 baud shows system status

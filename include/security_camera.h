@@ -3,21 +3,26 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
 #include "esp_camera.h"
-#include "SD_MMC.h"
+#include "SD.h"
+#include "SPI.h"
 #include "FS.h"
 #include "SPIFFS.h"
 
 // Hardware pin definitions for XIAO ESP32S3 SENSE
+#ifndef LED_BUILTIN
 #define LED_BUILTIN 21
-#define BUZZER_PIN 2
+#endif
+#define BUZZER_PIN 2   // HW-s08 passive buzzer (3.3V operation - lower volume than 5V)
 #define LED1_PIN 3
 #define LED2_PIN 4
 #define BUTTON_PIN 0  // Boot button
+#define PIR_SENSOR_PIN 1  // SB412A output (connect to free GPIO)
 
 // Camera configuration for XIAO ESP32S3 SENSE
 #define PWDN_GPIO_NUM     -1
@@ -37,15 +42,19 @@
 #define HREF_GPIO_NUM     47
 #define PCLK_GPIO_NUM     13
 
-// SD Card pins
-#define SD_MMC_CMD 38
-#define SD_MMC_CLK 39
-#define SD_MMC_D0  40
+// SD Card pin (XIAO ESP32S3 Sense expansion board uses SPI SD with CS=GPIO21)
+#define SD_CS_PIN 21
+
+// Agriculture IoT Sensor pins (SHT30 & Pump control)
+#define SHT30_SDA_PIN 5      // I2C SDA (wire library)
+#define SHT30_SCL_PIN 6      // I2C SCL (wire library)
+#define SHT30_POWER_PIN 43   // GPIO control for SHT30 VCC (avoid GPIO8 SD-line conflict)
+#define PUMP_MOSFET_PIN 44   // GPIO control for pump MOSFET gate (avoid SPI/SD pin conflict)
 
 // System configuration
-#define DETECTION_INTERVAL_MS 1000  // AI inference interval
+#define DETECTION_INTERVAL_MS 500  // 500ms間隔で反応速度向上
 #define ALERT_DURATION_MS 10000     // Alert duration (10 seconds)
-#define LED_BLINK_INTERVAL_MS 500   // LED blink interval (0.5 seconds)
+#define LED_BLINK_INTERVAL_MS 150   // LED点滅間隔 (0.15秒で高速点滅)
 #define RECORDING_DURATION_MS 30000 // Video recording duration (30 seconds)
 
 // WiFi configuration (change these to your network)
@@ -82,6 +91,8 @@ struct RecordingSystem {
     unsigned long recording_start_time;
     String current_filename;
     File video_file;
+    unsigned long last_frame_time;
+    int frame_count;
 };
 
 // Function declarations
@@ -89,15 +100,39 @@ bool initializeSystem();
 bool initializeCamera();
 bool initializeSDCard();
 bool initializeWiFi();
-bool initializeAI();
 void setupWebServer();
 
-// AI Detection functions
+// Detection functions
 bool detectPerson(camera_fb_t *fb);
 void processDetection();
 
 // Alert system functions
 void startAlert();
+void updateAlert();
+void stopAlert();
+void controlBuzzer(bool state);
+
+// Recording functions
+void startRecording();
+void updateRecording(camera_fb_t *fb);
+void stopRecording();
+String generateFilename();
+bool saveFrameToSD(camera_fb_t *fb);
+
+// Streaming functions
+void handleStream(AsyncWebServerRequest *request);
+String getStreamBoundary();
+
+// Communication functions
+void sendLINEMessage(String message);
+String getStreamingURL();
+unsigned long getCurrentTime();
+
+// Web handlers
+void handleRoot(AsyncWebServerRequest *request);
+void handleCapture(AsyncWebServerRequest *request);
+void handleError(String error_message);
+void printSystemStatus();
 void updateAlert();
 void stopAlert();
 void updateLEDs();
